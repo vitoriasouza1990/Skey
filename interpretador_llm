@@ -1,0 +1,166 @@
+import json
+import re
+import requests
+import pandas as pd
+from config import API_ENDPOINT, API_KEY
+
+# =========================================================
+# SCHEMA ESPERADO
+# =========================================================
+SCHEMA_LLM = [
+    "LLM_CLIENTE",
+    "LLM_CNPJ",
+    "ALIANCA",
+
+    "INICIO_ATENDIMENTO_HUMANO",
+    "FIM_ATENDIMENTO_HUMANO",
+    "TEMPO_TOTAL_ATENDIMENTO_HUMANO",
+    "TEMPO_MINIMO_DELAY",
+    "TEMPO_MAXIMO_DELAY",
+    "TEMPO_MEDIO_DELAY",
+
+    "TELEFONE",
+    "LLM_ATENDENTE",
+    "LLM_MOTIVO_LIGACAO",
+    "LLM_RESUMO_ATENDIMENTO",
+
+    "LLM_ENCERRAMENTO_INATIVIDADE",
+    "JUSTIFICATIVA_LLM_ENCERRAMENTO_INATIVIDADE",
+
+    "LLM_ATENDENTE_FICOU_DISPOSICAO",
+    "JUSTIFICATIVA_LLM_ATENDENTE_FICOU_DISPOSICAO",
+
+    "LLM_TABULACAO",
+    "JUSTIFICATIVA_LLM_TABULACAO",
+
+    "LLM_ATENDENTE_RESPONDEU_A_MOTIVACAO",
+    "JUSTIFICATIVA_LLM_ATENDENTE_RESPONDEU_A_MOTIVACAO",
+
+    "LLM_OFERTA_NOVOS_PRODUTOS",
+    "JUSTIFICATIVA_LLM_OFERTA_NOVOS_PRODUTOS",
+
+    "LLM_ASSUNTOS_NAO_TRATADOS",
+    "JUSTIFICATIVA_LLM_ASSUNTOS_NAO_TRATADOS",
+
+    "LLM_SENTIMENTO_CLIENTE_HOUVE_IRRITACAO",
+    "JUSTIFICATIVA_LLM_SENTIMENTO_CLIENTE_HOUVE_IRRITACAO",
+
+    "LLM_SENTIMENTO_CLIENTE_HOUVE_FRUSTRACAO",
+    "JUSTIFICATIVA_LLM_SENTIMENTO_CLIENTE_HOUVE_FRUSTRACAO",
+
+    "LLM_SENTIMENTO_CLIENTE_HOUVE_NEUTRALIDADE",
+    "JUSTIFICATIVA_LLM_SENTIMENTO_CLIENTE_HOUVE_NEUTRALIDADE",
+
+    "LLM_SENTIMENTO_CLIENTE_HOUVE_PREOCUPACAO",
+    "JUSTIFICATIVA_LLM_SENTIMENTO_CLIENTE_HOUVE_PREOCUPACAO",
+
+    "LLM_SENTIMENTO_CLIENTE_HOUVE_SATISFACAO",
+    "JUSTIFICATIVA_LLM_SENTIMENTO_CLIENTE_HOUVE_SATISFACAO",
+
+    "LLM_ATENDENTE_GENTIL",
+    "JUSTIFICATIVA_LLM_ATENDENTE_GENTIL",
+
+    "LLM_NPS",
+    "JUSTIFICATIVA_LLM_NPS",
+
+    "LLM_RISCO_JUDICIAL",
+    "JUSTIFICATIVA_LLM_RISCO_JUDICIAL",
+
+    "LLM_RISCO_OUVIDORIA",
+    "JUSTIFICATIVA_LLM_RISCO_OUVIDORIA",
+
+    "LLM_RISCO_CANCELAMENTO",
+    "JUSTIFICATIVA_LLM_RISCO_CANCELAMENTO",
+
+    "LLM_RISCO_ORGAOS_SUPERIORES",
+    "JUSTIFICATIVA_LLM_RISCO_ORGAOS_SUPERIORES"
+]
+
+# =========================================================
+# LIMPEZA DE RESPOSTA
+# =========================================================
+def _strip_code_fences(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*", "", s)
+    s = re.sub(r"```$", "", s)
+    return s.strip()
+
+# =========================================================
+# CHAMADA API
+# =========================================================
+def chamar_llm(prompt: str) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}"
+    }
+
+    payload = {
+        "messages": [
+            {"role": "system", "content": "Retorne apenas JSON válido."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
+    response = requests.post(API_ENDPOINT, headers=headers, json=payload)
+
+    if response.status_code != 200:
+        raise Exception(f"Erro API: {response.text}")
+
+    data = response.json()
+
+    try:
+        resposta_texto = data["choices"][0]["message"]["content"]
+    except Exception:
+        resposta_texto = str(data)
+
+    resposta_texto = _strip_code_fences(resposta_texto)
+
+    try:
+        return json.loads(resposta_texto)
+    except Exception:
+        print("[ERRO] JSON inválido:")
+        print(resposta_texto)
+        return {campo: "" for campo in SCHEMA_LLM}
+
+# =========================================================
+# FUNÇÃO PRINCIPAL
+# =========================================================
+def interpretar_transcricao(
+    texto: str,
+    id_infografico: str = None,
+    df_transcricao=None
+) -> pd.DataFrame:
+
+    prompt = f"""
+Você é um analista de qualidade de atendimento via WhatsApp.
+
+Analise a conversa abaixo e retorne APENAS um JSON válido.
+
+Regras:
+- Use exatamente as chaves fornecidas
+- Use "" se não houver informação
+- Não invente dados
+- Não coloque comentários
+
+Chaves obrigatórias:
+{json.dumps(SCHEMA_LLM, indent=2)}
+
+Transcrição:
+\"\"\"
+{texto}
+\"\"\"
+"""
+
+    resposta_llm = chamar_llm(prompt)
+
+    resultado = {}
+
+    for campo in SCHEMA_LLM:
+        valor = resposta_llm.get(campo, "")
+        resultado[campo] = valor if str(valor).strip() else ""
+
+    resultado["ID_INFOGRAFICO"] = id_infografico
+
+    return pd.DataFrame([resultado])
