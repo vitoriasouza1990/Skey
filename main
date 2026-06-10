@@ -1,0 +1,266 @@
+import os
+import shutil
+import traceback
+import uuid
+import re
+from datetime import datetime
+import pandas as pd
+
+from config import (
+    PASTA_ORIGEM,
+    PASTA_PROCESSADOS,
+    PASTA_ERROS,
+    PASTA_SAIDA_HTML,
+    TEMPLATE_HTML,
+)
+
+from parser_pdf import extrair_transcricao_segura
+from interpretador_llm import interpretar_transcricao
+from gerador_infografico import gerar_infografico
+
+
+# =========================================================
+# UTILIDADES
+# =========================================================
+
+def identificar_tipo_ator(row) -> str:
+    if "TIPO_ATOR" in row and pd.notna(row["TIPO_ATOR"]):
+        return str(row["TIPO_ATOR"]).strip().lower()
+    if "ATOR" in row and pd.notna(row["ATOR"]):
+        return str(row["ATOR"]).strip().lower()
+    return ""
+
+
+def extrair_session_id(caminho_pdf: str) -> str:
+    base = os.path.splitext(os.path.basename(caminho_pdf))[0]
+    m = re.search(r"(\d{4,})$", base)
+    return m.group(1) if m else ""
+
+
+def extrair_cnpj(df):
+    if df is None or df.empty:
+        return ""
+    texto = " ".join(df["TEXTO"].astype(str))
+    m = re.search(r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b", texto)
+    return m.group(0) if m else ""
+
+
+def extrair_telefone(df):
+    if df is None or df.empty:
+        return ""
+    texto = " ".join(df["TEXTO"].astype(str))
+    m = re.search(r"\b\d{10,11}\b", texto)
+    return m.group(0) if m else ""
+
+
+def inicio_atendimento_humano(df):
+    if df is None or df.empty:
+        return ""
+    for _, row in df.iterrows():
+        if identificar_tipo_ator(row) in ("atendente", "humano"):
+            return row.get("DATAHORA")
+    return ""
+
+
+def fim_atendimento_humano(df):
+    if df is None or df.empty:
+        return ""
+    humanos = [
+        row.get("DATAHORA")
+        for _, row in df.iterrows()
+        if identificar_tipo_ator(row) in ("atendente", "humano")
+    ]
+    return humanos[-1] if humanos else ""
+
+def calcular_delays(df):
+    if df is None or df.empty:
+        return "", "", ""
+
+    df = df.copy()
+    df["DATAHORA"] = pd.to_datetime(df["DATAHORA"], errors="coerce")
+
+    delays = []
+    ultima_msg_cliente = None
+
+    for _, row in df.sort_values("DATAHORA").iterrows():
+        tipo = identificar_tipo_ator(row)
+
+        if tipo == "cliente":
+            ultima_msg_cliente = row["DATAHORA"]
+
+        elif tipo in ("atendente", "humano") and ultima_msg_cliente is not None:
+            diff = (row["DATAHORA"] - ultima_msg_cliente).total_seconds()
+            if diff > 0:
+                delays.append(diff)
+            ultima_msg_cliente = None  # Reset após calcular o delay
+
+    if not delays:
+        return "", "", ""
+
+    tmin = f"{int(min(delays))}s"
+    tmax = f"{int(max(delays))}s"
+    tmed = f"{int(sum(delays) / len(delays))}s"
+
+    return tmin, tmax, tmed
+
+
+# def calcular_delays(df):
+#     if df is None or df.empty:
+#         return "", "", ""
+
+#     df = df.copy()
+#     df["DATAHORA"] = pd.to_datetime(df["DATAHORA"], errors="coerce")
+
+#     mensagens_cliente = df[
+#         df.apply(lambda r: identificar_tipo_ator(r) == "cliente", axis=1)
+#     ]
+#     mensagens_humano = df[
+#         df.apply(lambda r: identificar_tipo_ator(r) in ("atendente", "humano"), axis=1)
+#     ]
+
+#     delays = []
+
+#     for _, cli in mensagens_cliente.iterrows():
+#         respostas = mensagens_humano[
+#             mensagens_humano["DATAHORA"] > cli["DATAHORA"]
+#         ]
+#         if not respostas.empty:
+#             delta = (respostas.iloc[0]["DATAHORA"] - cli["DATAHORA"]).total_seconds()
+#             if delta >= 0:
+#                 delays.append(delta)
+
+#     if not delays:
+#         return "", "", ""
+
+#     return (
+#         f"{int(min(delays))}s",
+#         f"{int(max(delays))}s",
+#         f"{int(sum(delays) / len(delays))}s",
+#     )
+
+
+def _mover_arquivo_seguro(origem, destino_dir):
+    os.makedirs(destino_dir, exist_ok=True)
+    nome = os.path.basename(origem)
+    destino = os.path.join(destino_dir, nome)
+
+    if os.path.exists(destino):
+        base, ext = os.path.splitext(nome)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        destino = os.path.join(destino_dir, f"{base}_{ts}{ext}")
+
+    shutil.move(origem, destino)
+    print(f"[OK] Arquivo movido para: {destino}")
+
+
+# =========================================================
+# PROCESSAMENTO PRINCIPAL
+# =========================================================
+
+def processar_arquivo(caminho_pdf):
+    try:
+        print(f"\n[INICIO] {caminho_pdf}")
+
+        df_transcricao = extrair_transcricao_segura(caminho_pdf)
+
+        # ✅ BLOQUEIO TRANSCRIÇÃO
+        if df_transcricao is None or df_transcricao.empty:
+            print("[ERRO] Sem transcrição")
+            _mover_arquivo_seguro(caminho_pdf, PASTA_ERROS)
+            return
+
+        texto = "\n".join(df_transcricao["TEXTO"].astype(str))[:8000]
+
+        print("\n===== TEXTO ENVIADO PRA LLM =====")
+        print(texto[:1000])
+
+        base = os.path.splitext(os.path.basename(caminho_pdf))[0]
+        uid = uuid.uuid4().hex[:8]
+        id_infografico = f"{base}_{uid}"
+
+        # ✅ CHAMADA LLM
+        df_llm = interpretar_transcricao(
+            texto=texto,
+            id_infografico=id_infografico,
+            df_transcricao=df_transcricao,
+        )
+
+        # ✅ BLOQUEIO 1 — DF VAZIO
+        if df_llm is None or df_llm.empty:
+            print("[ERRO] df_llm vazio")
+            _mover_arquivo_seguro(caminho_pdf, PASTA_ERROS)
+            return
+
+        linha = df_llm.iloc[0]
+
+        # ✅ BLOQUEIO 2 — TUDO VAZIO
+        if linha.isnull().all() or (linha.astype(str).str.strip() == "").all():
+            print("[ERRO] LLM retornou só campos vazios")
+            _mover_arquivo_seguro(caminho_pdf, PASTA_ERROS)
+            return
+
+        print("\n===== RESULTADO LLM =====")
+        print(linha.to_dict())
+
+        # =========================================================
+        # ✅ CAMPOS ESTRUTURAIS
+        # =========================================================
+
+        df_llm.loc[0, "SESSION_ID"] = extrair_session_id(caminho_pdf)
+        df_llm.loc[0, "ALIANCA"] = "CLOVER"
+        df_llm.loc[0, "CHANNEL"] = "WhatsApp"
+        df_llm.loc[0, "HISTORICO"] = "Não aplicável"
+
+        df_llm.loc[0, "CNPJ"] = extrair_cnpj(df_transcricao) or "Não informado"
+        df_llm.loc[0, "TELEFONE"] = extrair_telefone(df_transcricao) or "Não informado"
+
+        df_llm.loc[0, "INICIO_ATENDIMENTO_HUMANO"] = inicio_atendimento_humano(df_transcricao)
+        df_llm.loc[0, "FIM_ATENDIMENTO_HUMANO"] = fim_atendimento_humano(df_transcricao)
+
+        inicio = pd.to_datetime(df_llm.loc[0, "INICIO_ATENDIMENTO_HUMANO"], errors="coerce")
+        fim = pd.to_datetime(df_llm.loc[0, "FIM_ATENDIMENTO_HUMANO"], errors="coerce")
+
+        if pd.notna(inicio) and pd.notna(fim):
+            total = int((fim - inicio).total_seconds())
+            df_llm.loc[0, "TEMPO_TOTAL_ATENDIMENTO_HUMANO"] = f"{total}s"
+        else:
+            df_llm.loc[0, "TEMPO_TOTAL_ATENDIMENTO_HUMANO"] = "Não aplicável"
+
+        tmin, tmax, tmed = calcular_delays(df_transcricao)
+
+        df_llm.loc[0, "TEMPO_MINIMO_DELAY"] = tmin or "Não aplicável"
+        df_llm.loc[0, "TEMPO_MAXIMO_DELAY"] = tmax or "Não aplicável"
+        df_llm.loc[0, "TEMPO_MEDIO_DELAY"] = tmed or "Não aplicável"
+
+        # =========================================================
+        # ✅ GERAR HTML
+        # =========================================================
+
+        os.makedirs(PASTA_SAIDA_HTML, exist_ok=True)
+        saida_html = os.path.join(PASTA_SAIDA_HTML, f"{id_infografico}.html")
+
+        gerar_infografico(
+            TEMPLATE_HTML,
+            df_transcricao,
+            df_llm,
+            saida_html,
+        )
+
+        print(f"[OK] Infográfico criado: {saida_html}")
+
+        _mover_arquivo_seguro(caminho_pdf, PASTA_PROCESSADOS)
+
+    except Exception as e:
+        print("\n[ERRO] Falha ao processar:", e)
+        traceback.print_exc()
+        _mover_arquivo_seguro(caminho_pdf, PASTA_ERROS)
+
+
+def executar_em_lote():
+    for f in os.listdir(PASTA_ORIGEM):
+        if f.lower().endswith(".pdf"):
+            processar_arquivo(os.path.join(PASTA_ORIGEM, f))
+
+
+if __name__ == "__main__":
+    executar_em_lote()
