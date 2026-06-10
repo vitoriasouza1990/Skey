@@ -23,12 +23,24 @@ from gerador_infografico import gerar_infografico
 # UTILIDADES
 # =========================================================
 
-def identificar_tipo_ator(row) -> str:
+def identificar_tipo_ator(row, nome_atendente="", nome_cliente="") -> str:
+    ator_raw = ""
     if "TIPO_ATOR" in row and pd.notna(row["TIPO_ATOR"]):
-        return str(row["TIPO_ATOR"]).strip().lower()
-    if "ATOR" in row and pd.notna(row["ATOR"]):
-        return str(row["ATOR"]).strip().lower()
-    return ""
+        ator_raw = str(row["TIPO_ATOR"]).strip()
+    elif "ATOR" in row and pd.notna(row["ATOR"]):
+        ator_raw = str(row["ATOR"]).strip()
+
+    ator = ator_raw.lower()
+
+    if ator in ("atendente", "humano", "cliente", "bot", "ia"):
+        return ator
+
+    if nome_atendente and ator == nome_atendente.strip().lower():
+        return "atendente"
+    if nome_cliente and ator == nome_cliente.strip().lower():
+        return "cliente"
+
+    return ator
 
 
 def extrair_session_id(caminho_pdf: str) -> str:
@@ -53,26 +65,27 @@ def extrair_telefone(df):
     return m.group(0) if m else ""
 
 
-def inicio_atendimento_humano(df):
+def inicio_atendimento_humano(df, nome_atendente="", nome_cliente=""):
     if df is None or df.empty:
         return ""
     for _, row in df.iterrows():
-        if identificar_tipo_ator(row) in ("atendente", "humano"):
+        if identificar_tipo_ator(row, nome_atendente, nome_cliente) in ("atendente", "humano"):
             return row.get("DATAHORA")
     return ""
 
 
-def fim_atendimento_humano(df):
+def fim_atendimento_humano(df, nome_atendente="", nome_cliente=""):
     if df is None or df.empty:
         return ""
     humanos = [
         row.get("DATAHORA")
         for _, row in df.iterrows()
-        if identificar_tipo_ator(row) in ("atendente", "humano")
+        if identificar_tipo_ator(row, nome_atendente, nome_cliente) in ("atendente", "humano")
     ]
     return humanos[-1] if humanos else ""
 
-def calcular_delays(df):
+
+def calcular_delays(df, nome_atendente="", nome_cliente=""):
     if df is None or df.empty:
         return "", "", ""
 
@@ -83,7 +96,7 @@ def calcular_delays(df):
     ultima_msg_cliente = None
 
     for _, row in df.sort_values("DATAHORA").iterrows():
-        tipo = identificar_tipo_ator(row)
+        tipo = identificar_tipo_ator(row, nome_atendente, nome_cliente)
 
         if tipo == "cliente":
             ultima_msg_cliente = row["DATAHORA"]
@@ -92,7 +105,7 @@ def calcular_delays(df):
             diff = (row["DATAHORA"] - ultima_msg_cliente).total_seconds()
             if diff > 0:
                 delays.append(diff)
-            ultima_msg_cliente = None  # Reset após calcular o delay
+            ultima_msg_cliente = None
 
     if not delays:
         return "", "", ""
@@ -206,16 +219,20 @@ def processar_arquivo(caminho_pdf):
         # ✅ CAMPOS ESTRUTURAIS
         # =========================================================
 
+        nome_atendente = str(linha.get("LLM_ATENDENTE", "")).strip()
+        nome_cliente = str(linha.get("LLM_CLIENTE", "")).strip()
+
         df_llm.loc[0, "SESSION_ID"] = extrair_session_id(caminho_pdf)
         df_llm.loc[0, "ALIANCA"] = "CLOVER"
         df_llm.loc[0, "CHANNEL"] = "WhatsApp"
         df_llm.loc[0, "HISTORICO"] = "Não aplicável"
+        df_llm.loc[0, "TABULACAO_HUMANA"] = "Não informado"
 
         df_llm.loc[0, "CNPJ"] = extrair_cnpj(df_transcricao) or "Não informado"
         df_llm.loc[0, "TELEFONE"] = extrair_telefone(df_transcricao) or "Não informado"
 
-        df_llm.loc[0, "INICIO_ATENDIMENTO_HUMANO"] = inicio_atendimento_humano(df_transcricao)
-        df_llm.loc[0, "FIM_ATENDIMENTO_HUMANO"] = fim_atendimento_humano(df_transcricao)
+        df_llm.loc[0, "INICIO_ATENDIMENTO_HUMANO"] = inicio_atendimento_humano(df_transcricao, nome_atendente, nome_cliente)
+        df_llm.loc[0, "FIM_ATENDIMENTO_HUMANO"] = fim_atendimento_humano(df_transcricao, nome_atendente, nome_cliente)
 
         inicio = pd.to_datetime(df_llm.loc[0, "INICIO_ATENDIMENTO_HUMANO"], errors="coerce")
         fim = pd.to_datetime(df_llm.loc[0, "FIM_ATENDIMENTO_HUMANO"], errors="coerce")
@@ -226,7 +243,7 @@ def processar_arquivo(caminho_pdf):
         else:
             df_llm.loc[0, "TEMPO_TOTAL_ATENDIMENTO_HUMANO"] = "Não aplicável"
 
-        tmin, tmax, tmed = calcular_delays(df_transcricao)
+        tmin, tmax, tmed = calcular_delays(df_transcricao, nome_atendente, nome_cliente)
 
         df_llm.loc[0, "TEMPO_MINIMO_DELAY"] = tmin or "Não aplicável"
         df_llm.loc[0, "TEMPO_MAXIMO_DELAY"] = tmax or "Não aplicável"
