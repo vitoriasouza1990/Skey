@@ -138,11 +138,21 @@ Você é um analista de qualidade de atendimento via WhatsApp.
 
 Analise a conversa abaixo e retorne APENAS um JSON válido.
 
-Regras:
+Regras gerais:
 - Use exatamente as chaves fornecidas
 - Use "" se não houver informação
 - Não invente dados
 - Não coloque comentários
+
+Instruções por campo:
+- LLM_CLIENTE: Nome completo do cliente identificado na conversa
+- LLM_ATENDENTE: Nome completo do atendente humano identificado na conversa
+- LLM_NPS: Estime uma nota de 0 a 10 representando o NPS do cliente com base no tom e desfecho da conversa. Mesmo sem menção explícita, estime pelo sentimento geral (ex: cliente satisfeito = 8-10, neutro = 6-7, insatisfeito = 0-5). NUNCA deixe vazio.
+- JUSTIFICATIVA_LLM_NPS: Frase curta explicando a nota NPS atribuída. NUNCA deixe vazio.
+- Campos LLM_SENTIMENTO_*: "Sim" ou "Não" baseado no tom percebido na conversa
+- Campos LLM_RISCO_*: "Sim" ou "Não" com base em evidências na conversa
+- LLM_TABULACAO: Classifique o motivo principal do atendimento em uma frase curta
+- LLM_RESUMO_ATENDIMENTO: Resumo objetivo em 1-2 frases do que foi tratado e resolvido
 
 Chaves obrigatórias:
 {json.dumps(SCHEMA_LLM, indent=2)}
